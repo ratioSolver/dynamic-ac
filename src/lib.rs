@@ -3,6 +3,8 @@ use std::{
     fmt::{Display, Formatter, Result},
 };
 
+type Callback = Box<dyn Fn(&Engine, usize)>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintKind {
     Equality,
@@ -14,14 +16,15 @@ struct ValueState {
     suppressed_by: Option<usize>,
 }
 
-pub struct DynamicAC {
+pub struct Engine {
     values: Vec<Vec<ValueState>>,
     constraints: HashMap<usize, (usize, usize, ConstraintKind)>,
+    listeners: HashMap<usize, Vec<Callback>>,
 }
 
-impl DynamicAC {
+impl Engine {
     pub fn new() -> Self {
-        Self { values: Vec::new(), constraints: HashMap::new() }
+        Self { values: Vec::new(), constraints: HashMap::new(), listeners: HashMap::new() }
     }
 
     pub fn add_var(&mut self, values: Vec<i32>) -> usize {
@@ -34,9 +37,16 @@ impl DynamicAC {
         self.values[var].iter().filter(|s| s.suppressed_by.is_none()).map(|s| s.value).collect()
     }
 
-    pub fn add_constraint(&mut self, var1: usize, var2: usize, kind: ConstraintKind) -> usize {
+    pub fn new_eq(&mut self, var1: usize, var2: usize) -> usize {
         let id = self.constraints.len();
-        self.constraints.insert(id, (var1, var2, kind));
+        self.constraints.insert(id, (var1, var2, ConstraintKind::Equality));
+        self.propagate(id);
+        id
+    }
+
+    pub fn new_neq(&mut self, var1: usize, var2: usize) -> usize {
+        let id = self.constraints.len();
+        self.constraints.insert(id, (var1, var2, ConstraintKind::Inequality));
         self.propagate(id);
         id
     }
@@ -88,7 +98,7 @@ impl DynamicAC {
         }
     }
 
-    fn revise(&mut self, var1: usize, var2: usize, kind: ConstraintKind, cid: usize) -> bool {
+    fn revise(&mut self, var1: usize, var2: usize, kind: ConstraintKind, id: usize) -> bool {
         let mut changed = false;
 
         let active_b: Vec<i32> = self.values[var2].iter().filter(|s| s.suppressed_by.is_none()).map(|s| s.value).collect();
@@ -102,16 +112,23 @@ impl DynamicAC {
                 };
 
                 if !has_support {
-                    state_a.suppressed_by = Some(cid);
+                    state_a.suppressed_by = Some(id);
                     changed = true;
                 }
             }
         }
         changed
     }
+
+    pub fn set_listener<F>(&mut self, var: usize, callback: F)
+    where
+        F: Fn(&Engine, usize) + 'static,
+    {
+        self.listeners.entry(var).or_default().push(Box::new(callback));
+    }
 }
 
-impl Display for DynamicAC {
+impl Display for Engine {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         for (i, var_values) in self.values.iter().enumerate() {
             let var_values: Vec<String> = var_values.iter().filter(|v| v.suppressed_by.is_none()).map(|v| v.value.to_string()).collect();
@@ -134,11 +151,11 @@ mod tests {
 
     #[test]
     fn test_basic_equality() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         let a = ac.add_var(vec![1, 2, 3]);
         let b = ac.add_var(vec![2, 3, 4]);
 
-        ac.add_constraint(a, b, ConstraintKind::Equality);
+        ac.new_eq(a, b);
 
         // Intersection should be {2, 3}
         assert_eq!(ac.val(a), vec![2, 3]);
@@ -147,13 +164,13 @@ mod tests {
 
     #[test]
     fn test_transitive_equality() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         let a = ac.add_var(vec![1, 2]);
         let b = ac.add_var(vec![2, 3]);
         let c = ac.add_var(vec![3, 4]);
 
-        ac.add_constraint(a, b, ConstraintKind::Equality); // a:{2}, b:{2}
-        ac.add_constraint(b, c, ConstraintKind::Equality); // b: empty, c: empty
+        ac.new_eq(a, b); // a:{2}, b:{2}
+        ac.new_eq(b, c); // b: empty, c: empty
 
         assert!(ac.val(a).is_empty());
         assert!(ac.val(b).is_empty());
@@ -162,11 +179,11 @@ mod tests {
 
     #[test]
     fn test_inequality_singleton_pruning() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         let a = ac.add_var(vec![1]);
         let b = ac.add_var(vec![1, 2, 3]);
 
-        ac.add_constraint(a, b, ConstraintKind::Inequality);
+        ac.new_neq(a, b);
 
         // Since a is {1}, b cannot be 1.
         assert_eq!(ac.val(b), vec![2, 3]);
@@ -174,11 +191,11 @@ mod tests {
 
     #[test]
     fn test_basic_retraction() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         let a = ac.add_var(vec![1, 2]);
         let b = ac.add_var(vec![3, 4]);
 
-        let c_id = ac.add_constraint(a, b, ConstraintKind::Equality);
+        let c_id = ac.new_eq(a, b);
         assert!(ac.val(a).is_empty());
 
         ac.retract_constraint(c_id);
@@ -189,15 +206,15 @@ mod tests {
 
     #[test]
     fn test_multiple_suppression_logic() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         let a = ac.add_var(vec![1, 2, 3]);
         let b = ac.add_var(vec![1]);
         let c = ac.add_var(vec![1]);
 
         // Constraint 0: a != b  => a: {2, 3}
-        let id0 = ac.add_constraint(a, b, ConstraintKind::Inequality);
+        let id0 = ac.new_neq(a, b);
         // Constraint 1: a != c  => a: {2, 3}
-        let id1 = ac.add_constraint(a, c, ConstraintKind::Inequality);
+        let id1 = ac.new_neq(a, c);
 
         assert_eq!(ac.val(a), vec![2, 3]);
 
@@ -214,17 +231,17 @@ mod tests {
 
     #[test]
     fn test_diamond_chain_propagation() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         let a = ac.add_var(vec![1, 2, 3]);
         let b = ac.add_var(vec![2, 3, 4]);
         let c = ac.add_var(vec![2, 3, 4]);
         let d = ac.add_var(vec![3, 4, 5]);
 
         // Setup chain: a == b, b == d, a == c, c == d
-        ac.add_constraint(a, b, ConstraintKind::Equality); // a,b: {2,3}
-        ac.add_constraint(b, d, ConstraintKind::Equality); // a,b,d: {3}
-        ac.add_constraint(a, c, ConstraintKind::Equality); // c: {3}
-        ac.add_constraint(c, d, ConstraintKind::Equality);
+        ac.new_eq(a, b); // a,b: {2,3}
+        ac.new_eq(b, d); // a,b,d: {3}
+        ac.new_eq(a, c); // c: {3}
+        ac.new_eq(c, d);
 
         assert_eq!(ac.val(a), vec![3]);
         assert_eq!(ac.val(d), vec![3]);
@@ -232,14 +249,14 @@ mod tests {
 
     #[test]
     fn test_inequality_chain_reaction() {
-        let mut ac = DynamicAC::new();
+        let mut ac = Engine::new();
         // A chain where narrowing one forces another via inequalities
         let a = ac.add_var(vec![1]);
         let b = ac.add_var(vec![1, 2]);
         let c = ac.add_var(vec![2, 3]);
 
-        ac.add_constraint(a, b, ConstraintKind::Inequality); // forces b to {2}
-        ac.add_constraint(b, c, ConstraintKind::Inequality); // forces c to {3}
+        ac.new_neq(a, b); // forces b to {2}
+        ac.new_neq(b, c); // forces c to {3}
 
         assert_eq!(ac.val(b), vec![2]);
         assert_eq!(ac.val(c), vec![3]);
