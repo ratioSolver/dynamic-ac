@@ -21,7 +21,6 @@ pub struct Engine {
     constraints: HashMap<usize, (usize, usize, ConstraintKind)>,
     listeners: HashMap<usize, Vec<Callback>>,
 }
-
 impl Engine {
     pub fn new() -> Self {
         Self { values: Vec::new(), constraints: HashMap::new(), listeners: HashMap::new() }
@@ -52,56 +51,62 @@ impl Engine {
     }
 
     pub fn retract_constraint(&mut self, id: usize) {
-        if let Some((a, b, _)) = self.constraints.remove(&id) {
-            let mut to_check = VecDeque::new();
-
-            // 1. Find all values killed by this specific constraint and free them
-            for var in &[a, b] {
-                if let Some(domain) = self.values.get_mut(*var) {
+        if let Some((var1, var2, _)) = self.constraints.remove(&id) {
+            // 1. Free only values that were killed *by this exact constraint*
+            for &var in &[var1, var2] {
+                if let Some(domain) = self.values.get_mut(var) {
                     for state in domain {
                         if state.suppressed_by == Some(id) {
                             state.suppressed_by = None;
-                            to_check.push_back(var.clone());
                         }
                     }
                 }
             }
 
-            // 2. Re-propagate because the "resurrected" values might now satisfy other constraints that were previously pruning values.
-            self.propagate_all();
+            // 2. Re-propagate only the affected subgraph (true incremental)
+            self.propagate_touching(&[var1, var2]);
         }
     }
 
-    fn propagate(&mut self, constraint: usize) {
-        let mut prop_q = VecDeque::new();
-        let mut in_queue = HashSet::new();
-        prop_q.push_back(constraint);
-        in_queue.insert(constraint);
+    fn propagate(&mut self, start_id: usize) {
+        self.propagate_from_queue(vec![start_id]);
+    }
+
+    fn propagate_touching(&mut self, vars: &[usize]) {
+        let mut initial = Vec::new();
+        for &v in vars {
+            for (&id, (v1, v2, _)) in &self.constraints {
+                if *v1 == v || *v2 == v {
+                    initial.push(id);
+                }
+            }
+        }
+        self.propagate_from_queue(initial);
+    }
+
+    fn propagate_from_queue(&mut self, initial: Vec<usize>) {
+        let mut prop_q: VecDeque<usize> = initial.into();
+        let mut in_queue: HashSet<usize> = prop_q.iter().cloned().collect();
 
         while let Some(c) = prop_q.pop_front() {
             in_queue.remove(&c);
 
-            let (var1, var2, kind) = self.constraints.get(&c).unwrap().clone();
+            let (var1, var2, kind) = *self.constraints.get(&c).unwrap();
+
             let changed1 = self.revise(var1, var2, kind, c);
             let changed2 = self.revise(var2, var1, kind, c);
 
             if changed1 || changed2 {
-                for (&id, (v1, v2, _)) in &self.constraints {
-                    if id != c && !in_queue.contains(&id) {
-                        if *v1 == var1 || *v2 == var1 || *v1 == var2 || *v2 == var2 {
+                // enqueue all constraints that touch the changed variables
+                for &v in &[var1, var2] {
+                    for (&id, (v1, v2, _)) in &self.constraints {
+                        if id != c && !in_queue.contains(&id) && (*v1 == v || *v2 == v) {
                             prop_q.push_back(id);
                             in_queue.insert(id);
                         }
                     }
                 }
             }
-        }
-    }
-
-    fn propagate_all(&mut self) {
-        let keys: Vec<usize> = self.constraints.keys().cloned().collect();
-        for id in keys {
-            self.propagate(id);
         }
     }
 
@@ -112,16 +117,21 @@ impl Engine {
 
         let domain_a = self.values.get_mut(var1).unwrap();
         for state_a in domain_a {
-            if state_a.suppressed_by.is_none() {
-                let has_support = match kind {
-                    ConstraintKind::Equality => active_b.contains(&state_a.value),
-                    ConstraintKind::Inequality => active_b.iter().any(|&v_b| v_b != state_a.value),
-                };
+            let has_support = match kind {
+                ConstraintKind::Equality => active_b.contains(&state_a.value),
+                ConstraintKind::Inequality => active_b.iter().any(|&v_b| v_b != state_a.value),
+            };
 
-                if !has_support {
-                    state_a.suppressed_by = Some(id);
+            if has_support {
+                // This constraint no longer kills the value → possible revival
+                if state_a.suppressed_by == Some(id) {
+                    state_a.suppressed_by = None;
                     changed = true;
                 }
+            } else if state_a.suppressed_by.is_none() {
+                // This constraint now kills the value
+                state_a.suppressed_by = Some(id);
+                changed = true;
             }
         }
         changed
