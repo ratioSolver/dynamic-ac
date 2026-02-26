@@ -1,0 +1,11 @@
+[package]
+name = "dynamic-ac"
+version = "0.1.0"
+authors = ["Riccardo De Benedictis"]
+edition = "2024"
+description = "An incremental Arc Consistency propagator in Rust that supports dynamic addition and retraction of binary constraints"
+readme = "README.md"
+repository = "https://github.com/ratioSolver/dynamic-ac"
+license-file = "LICENSE.txt"
+
+[dependencies]
