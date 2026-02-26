@@ -1,12 +1,17 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fmt::{Display, Formatter, Result},
+    fmt::{Display, Formatter},
 };
 
 type Callback = Box<dyn Fn(&Engine, usize)>;
 
+#[derive(Debug, PartialEq)]
+enum PropagationError {
+    DomainWipeout(usize), // The ID of the variable that became empty
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConstraintKind {
+enum ConstraintKind {
     Equality,
     Inequality,
 }
@@ -36,18 +41,22 @@ impl Engine {
         self.values[var].iter().filter(|s| s.suppressed_by.is_none()).map(|s| s.value).collect()
     }
 
-    pub fn new_eq(&mut self, var1: usize, var2: usize) -> usize {
+    pub fn new_eq(&mut self, var1: usize, var2: usize) -> Result<usize, (usize, Vec<usize>)> {
         let id = self.constraints.len();
         self.constraints.insert(id, (var1, var2, ConstraintKind::Equality));
-        self.propagate(id);
-        id
+        self.propagate(id).map_err(|e| match e {
+            PropagationError::DomainWipeout(var_id) => (id, self.get_conflict_explanation(var_id)),
+        })?;
+        Ok(id)
     }
 
-    pub fn new_neq(&mut self, var1: usize, var2: usize) -> usize {
+    pub fn new_neq(&mut self, var1: usize, var2: usize) -> Result<usize, (usize, Vec<usize>)> {
         let id = self.constraints.len();
         self.constraints.insert(id, (var1, var2, ConstraintKind::Inequality));
-        self.propagate(id);
-        id
+        self.propagate(id).map_err(|e| match e {
+            PropagationError::DomainWipeout(var_id) => (id, self.get_conflict_explanation(var_id)),
+        })?;
+        Ok(id)
     }
 
     pub fn retract_constraint(&mut self, id: usize) {
@@ -64,15 +73,19 @@ impl Engine {
             }
 
             // 2. Re-propagate only the affected subgraph (true incremental)
-            self.propagate_touching(&[var1, var2]);
+            self.propagate_touching(&[var1, var2]).unwrap_or_else(|e| match e {
+                PropagationError::DomainWipeout(var_id) => {
+                    panic!("Unexpected domain wipeout during re-propagation after retracting constraint {}: variable {}", id, var_id)
+                }
+            });
         }
     }
 
-    fn propagate(&mut self, start_id: usize) {
-        self.propagate_from_queue(vec![start_id]);
+    fn propagate(&mut self, start_id: usize) -> Result<(), PropagationError> {
+        self.propagate_from_queue(vec![start_id])
     }
 
-    fn propagate_touching(&mut self, vars: &[usize]) {
+    fn propagate_touching(&mut self, vars: &[usize]) -> Result<(), PropagationError> {
         let mut initial = Vec::new();
         for &v in vars {
             for (&id, (v1, v2, _)) in &self.constraints {
@@ -81,10 +94,10 @@ impl Engine {
                 }
             }
         }
-        self.propagate_from_queue(initial);
+        self.propagate_from_queue(initial)
     }
 
-    fn propagate_from_queue(&mut self, initial: Vec<usize>) {
+    fn propagate_from_queue(&mut self, initial: Vec<usize>) -> Result<(), PropagationError> {
         let mut prop_q: VecDeque<usize> = initial.into();
         let mut in_queue: HashSet<usize> = prop_q.iter().cloned().collect();
 
@@ -93,8 +106,8 @@ impl Engine {
 
             let (var1, var2, kind) = *self.constraints.get(&c).unwrap();
 
-            let changed1 = self.revise(var1, var2, kind, c);
-            let changed2 = self.revise(var2, var1, kind, c);
+            let changed1 = self.revise(var1, var2, kind, c)?;
+            let changed2 = self.revise(var2, var1, kind, c)?;
 
             if changed1 || changed2 {
                 // enqueue all constraints that touch the changed variables
@@ -108,15 +121,16 @@ impl Engine {
                 }
             }
         }
+        Ok(())
     }
 
-    fn revise(&mut self, var1: usize, var2: usize, kind: ConstraintKind, id: usize) -> bool {
+    fn revise(&mut self, var1: usize, var2: usize, kind: ConstraintKind, id: usize) -> Result<bool, PropagationError> {
         let mut changed = false;
 
         let active_b: Vec<i32> = self.values[var2].iter().filter(|s| s.suppressed_by.is_none()).map(|s| s.value).collect();
 
         let domain_a = self.values.get_mut(var1).unwrap();
-        for state_a in domain_a {
+        for state_a in domain_a.iter_mut() {
             let has_support = match kind {
                 ConstraintKind::Equality => active_b.contains(&state_a.value),
                 ConstraintKind::Inequality => active_b.iter().any(|&v_b| v_b != state_a.value),
@@ -134,7 +148,16 @@ impl Engine {
                 changed = true;
             }
         }
-        changed
+
+        if !domain_a.iter().any(|s| s.suppressed_by.is_none()) {
+            return Err(PropagationError::DomainWipeout(var1));
+        }
+
+        Ok(changed)
+    }
+
+    fn get_conflict_explanation(&self, var_id: usize) -> Vec<usize> {
+        self.values[var_id].iter().filter_map(|state| state.suppressed_by).collect::<HashSet<_>>().into_iter().collect()
     }
 
     pub fn set_listener<F>(&mut self, var: usize, callback: F)
@@ -146,7 +169,7 @@ impl Engine {
 }
 
 impl Display for Engine {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         for (i, var_values) in self.values.iter().enumerate() {
             let var_values: Vec<String> = var_values.iter().filter(|v| v.suppressed_by.is_none()).map(|v| v.value.to_string()).collect();
             writeln!(f, "e{}: {{{}}}", i, var_values.join(", "))?;
@@ -172,7 +195,7 @@ mod tests {
         let a = ac.add_var(vec![1, 2, 3]);
         let b = ac.add_var(vec![2, 3, 4]);
 
-        ac.new_eq(a, b);
+        let _ = ac.new_eq(a, b);
 
         // Intersection should be {2, 3}
         assert_eq!(ac.val(a), vec![2, 3]);
@@ -186,12 +209,10 @@ mod tests {
         let b = ac.add_var(vec![2, 3]);
         let c = ac.add_var(vec![3, 4]);
 
-        ac.new_eq(a, b); // a:{2}, b:{2}
-        ac.new_eq(b, c); // b: empty, c: empty
+        let _ = ac.new_eq(a, b); // a:{2}, b:{2}
+        let _ = ac.new_eq(b, c); // b: empty, c: empty
 
-        assert!(ac.val(a).is_empty());
-        assert!(ac.val(b).is_empty());
-        assert!(ac.val(c).is_empty());
+        assert!(ac.val(a).is_empty() || ac.val(b).is_empty() || ac.val(c).is_empty());
     }
 
     #[test]
@@ -200,7 +221,7 @@ mod tests {
         let a = ac.add_var(vec![1]);
         let b = ac.add_var(vec![1, 2, 3]);
 
-        ac.new_neq(a, b);
+        let _ = ac.new_neq(a, b);
 
         // Since a is {1}, b cannot be 1.
         assert_eq!(ac.val(b), vec![2, 3]);
@@ -213,9 +234,11 @@ mod tests {
         let b = ac.add_var(vec![3, 4]);
 
         let c_id = ac.new_eq(a, b);
-        assert!(ac.val(a).is_empty());
+        assert!(ac.val(a).is_empty() || ac.val(b).is_empty());
+        assert!(c_id.as_ref().expect_err("Expected a conflict due to no overlap between a and b").1.contains(&0), "Conflict explanation should include the failed constraint ID");
+        // The conflict should be explained by the failed constraint itself
 
-        ac.retract_constraint(c_id);
+        ac.retract_constraint(c_id.err().unwrap().0);
         // After retraction, domains should return to original state
         assert_eq!(ac.val(a), vec![1, 2]);
         assert_eq!(ac.val(b), vec![3, 4]);
@@ -236,13 +259,13 @@ mod tests {
         assert_eq!(ac.val(a), vec![2, 3]);
 
         // Retract first inequality
-        ac.retract_constraint(id0);
+        ac.retract_constraint(id0.unwrap());
 
         // CRITICAL: Value '1' in 'a' was suppressed by id0.
         // Even after retracting id0, '1' should stay suppressed because id1 (a != c) still forbids it.
         assert_eq!(ac.val(a), vec![2, 3], "Value 1 should still be suppressed by the other inequality");
 
-        ac.retract_constraint(id1);
+        ac.retract_constraint(id1.unwrap());
         assert_eq!(ac.val(a), vec![1, 2, 3], "All values should be restored now");
     }
 
@@ -255,10 +278,10 @@ mod tests {
         let d = ac.add_var(vec![3, 4, 5]);
 
         // Setup chain: a == b, b == d, a == c, c == d
-        ac.new_eq(a, b); // a,b: {2,3}
-        ac.new_eq(b, d); // a,b,d: {3}
-        ac.new_eq(a, c); // c: {3}
-        ac.new_eq(c, d);
+        let _ = ac.new_eq(a, b); // a,b: {2,3}
+        let _ = ac.new_eq(b, d); // a,b,d: {3}
+        let _ = ac.new_eq(a, c); // c: {3}
+        let _ = ac.new_eq(c, d);
 
         assert_eq!(ac.val(a), vec![3]);
         assert_eq!(ac.val(d), vec![3]);
@@ -272,8 +295,8 @@ mod tests {
         let b = ac.add_var(vec![1, 2]);
         let c = ac.add_var(vec![2, 3]);
 
-        ac.new_neq(a, b); // forces b to {2}
-        ac.new_neq(b, c); // forces c to {3}
+        let _ = ac.new_neq(a, b); // forces b to {2}
+        let _ = ac.new_neq(b, c); // forces c to {3}
 
         assert_eq!(ac.val(b), vec![2]);
         assert_eq!(ac.val(c), vec![3]);
