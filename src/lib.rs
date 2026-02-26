@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::{Display, Formatter, Result},
 };
 
@@ -74,17 +74,24 @@ impl Engine {
 
     fn propagate(&mut self, constraint: usize) {
         let mut prop_q = VecDeque::new();
+        let mut in_queue = HashSet::new();
         prop_q.push_back(constraint);
+        in_queue.insert(constraint);
 
         while let Some(c) = prop_q.pop_front() {
+            in_queue.remove(&c);
+
             let (var1, var2, kind) = self.constraints.get(&c).unwrap().clone();
             let changed1 = self.revise(var1, var2, kind, c);
             let changed2 = self.revise(var2, var1, kind, c);
 
             if changed1 || changed2 {
                 for (&id, (v1, v2, _)) in &self.constraints {
-                    if *v1 == var1 || *v2 == var1 || *v1 == var2 || *v2 == var2 {
-                        prop_q.push_back(id);
+                    if id != c && !in_queue.contains(&id) {
+                        if *v1 == var1 || *v2 == var1 || *v1 == var2 || *v2 == var2 {
+                            prop_q.push_back(id);
+                            in_queue.insert(id);
+                        }
                     }
                 }
             }
