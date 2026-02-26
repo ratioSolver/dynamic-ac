@@ -127,3 +127,121 @@ impl Display for DynamicAC {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_equality() {
+        let mut ac = DynamicAC::new();
+        let a = ac.add_var(vec![1, 2, 3]);
+        let b = ac.add_var(vec![2, 3, 4]);
+
+        ac.add_constraint(a, b, ConstraintKind::Equality);
+
+        // Intersection should be {2, 3}
+        assert_eq!(ac.val(a), vec![2, 3]);
+        assert_eq!(ac.val(b), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_transitive_equality() {
+        let mut ac = DynamicAC::new();
+        let a = ac.add_var(vec![1, 2]);
+        let b = ac.add_var(vec![2, 3]);
+        let c = ac.add_var(vec![3, 4]);
+
+        ac.add_constraint(a, b, ConstraintKind::Equality); // a:{2}, b:{2}
+        ac.add_constraint(b, c, ConstraintKind::Equality); // b: empty, c: empty
+
+        assert!(ac.val(a).is_empty());
+        assert!(ac.val(b).is_empty());
+        assert!(ac.val(c).is_empty());
+    }
+
+    #[test]
+    fn test_inequality_singleton_pruning() {
+        let mut ac = DynamicAC::new();
+        let a = ac.add_var(vec![1]);
+        let b = ac.add_var(vec![1, 2, 3]);
+
+        ac.add_constraint(a, b, ConstraintKind::Inequality);
+
+        // Since a is {1}, b cannot be 1.
+        assert_eq!(ac.val(b), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_basic_retraction() {
+        let mut ac = DynamicAC::new();
+        let a = ac.add_var(vec![1, 2]);
+        let b = ac.add_var(vec![3, 4]);
+
+        let c_id = ac.add_constraint(a, b, ConstraintKind::Equality);
+        assert!(ac.val(a).is_empty());
+
+        ac.retract_constraint(c_id);
+        // After retraction, domains should return to original state
+        assert_eq!(ac.val(a), vec![1, 2]);
+        assert_eq!(ac.val(b), vec![3, 4]);
+    }
+
+    #[test]
+    fn test_multiple_suppression_logic() {
+        let mut ac = DynamicAC::new();
+        let a = ac.add_var(vec![1, 2, 3]);
+        let b = ac.add_var(vec![1]);
+        let c = ac.add_var(vec![1]);
+
+        // Constraint 0: a != b  => a: {2, 3}
+        let id0 = ac.add_constraint(a, b, ConstraintKind::Inequality);
+        // Constraint 1: a != c  => a: {2, 3}
+        let id1 = ac.add_constraint(a, c, ConstraintKind::Inequality);
+
+        assert_eq!(ac.val(a), vec![2, 3]);
+
+        // Retract first inequality
+        ac.retract_constraint(id0);
+
+        // CRITICAL: Value '1' in 'a' was suppressed by id0.
+        // Even after retracting id0, '1' should stay suppressed because id1 (a != c) still forbids it.
+        assert_eq!(ac.val(a), vec![2, 3], "Value 1 should still be suppressed by the other inequality");
+
+        ac.retract_constraint(id1);
+        assert_eq!(ac.val(a), vec![1, 2, 3], "All values should be restored now");
+    }
+
+    #[test]
+    fn test_diamond_chain_propagation() {
+        let mut ac = DynamicAC::new();
+        let a = ac.add_var(vec![1, 2, 3]);
+        let b = ac.add_var(vec![2, 3, 4]);
+        let c = ac.add_var(vec![2, 3, 4]);
+        let d = ac.add_var(vec![3, 4, 5]);
+
+        // Setup chain: a == b, b == d, a == c, c == d
+        ac.add_constraint(a, b, ConstraintKind::Equality); // a,b: {2,3}
+        ac.add_constraint(b, d, ConstraintKind::Equality); // a,b,d: {3}
+        ac.add_constraint(a, c, ConstraintKind::Equality); // c: {3}
+        ac.add_constraint(c, d, ConstraintKind::Equality);
+
+        assert_eq!(ac.val(a), vec![3]);
+        assert_eq!(ac.val(d), vec![3]);
+    }
+
+    #[test]
+    fn test_inequality_chain_reaction() {
+        let mut ac = DynamicAC::new();
+        // A chain where narrowing one forces another via inequalities
+        let a = ac.add_var(vec![1]);
+        let b = ac.add_var(vec![1, 2]);
+        let c = ac.add_var(vec![2, 3]);
+
+        ac.add_constraint(a, b, ConstraintKind::Inequality); // forces b to {2}
+        ac.add_constraint(b, c, ConstraintKind::Inequality); // forces c to {3}
+
+        assert_eq!(ac.val(b), vec![2]);
+        assert_eq!(ac.val(c), vec![3]);
+    }
+}
