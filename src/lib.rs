@@ -27,20 +27,42 @@ pub struct Engine {
     listeners: HashMap<usize, Vec<Callback>>,
 }
 impl Engine {
+    /// Creates a new empty constraint engine.
+    ///
+    /// The returned engine has no variables, no constraints, and no listeners.
     pub fn new() -> Self {
         Self { values: Vec::new(), constraints: HashMap::new(), listeners: HashMap::new() }
     }
 
+    /// Adds a variable with the provided initial domain.
+    ///
+    /// Returns the variable ID that can be used with methods like
+    /// [`Engine::val`], [`Engine::new_eq`], and [`Engine::new_neq`].
+    ///
+    /// All inserted values start as active (not suppressed).
     pub fn add_var(&mut self, values: Vec<i32>) -> usize {
         let id = self.values.len();
         self.values.push(values.into_iter().map(|v| ValueState { value: v, suppressed_by: None }).collect());
         id
     }
 
+    /// Returns the currently active domain values of a variable.
+    ///
+    /// Suppressed values are excluded from the returned vector.
+    ///
+    /// Panics if `var` is not a valid variable ID.
     pub fn val(&self, var: usize) -> Vec<i32> {
         self.values[var].iter().filter(|s| s.suppressed_by.is_none()).map(|s| s.value).collect()
     }
 
+    /// Adds an equality constraint between two variables and propagates it.
+    ///
+    /// On success, returns the newly assigned constraint ID.
+    ///
+    /// On failure, returns `(constraint_id, explanation)` where `explanation`
+    /// contains IDs of constraints involved in the domain wipeout.
+    /// The newly created constraint remains in the engine and can be removed
+    /// with [`Engine::retract_constraint`].
     pub fn new_eq(&mut self, var1: usize, var2: usize) -> Result<usize, (usize, Vec<usize>)> {
         let id = self.constraints.len();
         self.constraints.insert(id, (var1, var2, ConstraintKind::Equality));
@@ -50,6 +72,14 @@ impl Engine {
         Ok(id)
     }
 
+    /// Adds an inequality constraint between two variables and propagates it.
+    ///
+    /// On success, returns the newly assigned constraint ID.
+    ///
+    /// On failure, returns `(constraint_id, explanation)` where `explanation`
+    /// contains IDs of constraints involved in the domain wipeout.
+    /// The newly created constraint remains in the engine and can be removed
+    /// with [`Engine::retract_constraint`].
     pub fn new_neq(&mut self, var1: usize, var2: usize) -> Result<usize, (usize, Vec<usize>)> {
         let id = self.constraints.len();
         self.constraints.insert(id, (var1, var2, ConstraintKind::Inequality));
@@ -59,6 +89,13 @@ impl Engine {
         Ok(id)
     }
 
+    /// Retracts a constraint by ID and incrementally restores consistency.
+    ///
+    /// If the ID is present, the constraint is removed, values suppressed by
+    /// that exact constraint are released, and only the affected neighborhood is
+    /// re-propagated. If the ID does not exist, this method is a no-op.
+    ///
+    /// Panics if re-propagation unexpectedly causes a domain wipeout.
     pub fn retract_constraint(&mut self, id: usize) {
         if let Some((var1, var2, _)) = self.constraints.remove(&id) {
             // 1. Free only values that were killed *by this exact constraint*
