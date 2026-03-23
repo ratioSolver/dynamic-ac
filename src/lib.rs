@@ -28,6 +28,13 @@ pub struct Engine {
     constraints: HashMap<usize, (usize, usize, ConstraintKind)>,
     listeners: HashMap<usize, Vec<Callback>>,
 }
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Engine {
     /// Creates a new empty constraint engine.
     ///
@@ -298,7 +305,7 @@ impl Display for Engine {
             let var_values: Vec<String> = var_values.iter().filter(|v| v.suppressed_by.is_none()).map(|v| v.value.to_string()).collect();
             writeln!(f, "e{}: {{{}}}", i, var_values.join(", "))?;
         }
-        for (_, (var1, var2, kind)) in &self.constraints {
+        for (var1, var2, kind) in self.constraints.values() {
             let kind_str = match kind {
                 ConstraintKind::Equality => "==",
                 ConstraintKind::Inequality => "!=",
