@@ -1,13 +1,27 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId(usize);
 
 impl fmt::Display for VarId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "x{}", self.0)
+        write!(f, "e{}", self.0)
     }
 }
+
+struct Value {
+    value: i32,
+    suppressed_by: Option<ConstraintId>, // The constraint that suppresses this value, if any.
+    supported_by: HashMap<VarId, usize>, // Maps supporting variables to the value index in their domain.
+}
+
+struct Variable {
+    id: VarId,
+    domain: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstraintId(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Constraint {
