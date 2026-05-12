@@ -3,6 +3,8 @@ use std::{
     fmt,
 };
 
+type Callback = Box<dyn Fn(usize)>;
+
 #[derive(Debug, Clone)]
 pub enum Constraint {
     Equality(usize, usize),   // Represents an equality constraint between two variables (e.g., x_i == x_j).
@@ -58,6 +60,7 @@ pub struct Engine {
     constraints: Vec<ConstraintEntry>,
     // Key: (constraint_id, from_var, to_var, from_value) -> supporting to_value.
     residues: HashMap<(usize, usize, usize, i32), i32>,
+    listeners: HashMap<usize, Vec<Callback>>,
 }
 
 impl Default for Engine {
@@ -68,7 +71,12 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Self { variables: Vec::new(), constraints: Vec::new(), residues: HashMap::new() }
+        Self {
+            variables: Vec::new(),
+            constraints: Vec::new(),
+            residues: HashMap::new(),
+            listeners: HashMap::new(),
+        }
     }
 
     pub fn add_variable(&mut self, domain: impl IntoIterator<Item = i32>) -> usize {
@@ -190,6 +198,23 @@ impl Engine {
 
         self.residues.retain(|(cid, _, _, _), _| !constraint_ids.contains(cid));
         self.propagate_from_vars(&all_touched.into_iter().collect::<Vec<_>>())
+    }
+
+    /// Register a callback to be notified when a variable's domain changes.
+    /// The callback receives the variable ID.
+    pub fn set_listener<F>(&mut self, var: usize, callback: F)
+    where
+        F: Fn(usize) + 'static,
+    {
+        self.listeners.entry(var).or_insert_with(Vec::new).push(Box::new(callback));
+    }
+
+    fn notify_listeners(&self, var: usize) {
+        if let Some(cbs) = self.listeners.get(&var) {
+            for cb in cbs {
+                cb(var);
+            }
+        }
     }
 
     fn constraint_vars(&self, constraint_id: usize) -> Result<Vec<usize>, PropagationError> {
@@ -317,6 +342,10 @@ impl Engine {
             return Err(self.wipeout(var));
         }
 
+        if changed {
+            self.notify_listeners(var);
+        }
+
         Ok(changed)
     }
 
@@ -348,6 +377,10 @@ impl Engine {
 
         if !self.has_active_value(from) {
             return Err(self.wipeout(from));
+        }
+
+        if changed {
+            self.notify_listeners(from);
         }
 
         Ok(changed)
@@ -678,5 +711,37 @@ mod tests {
         assert_eq!(ac1.val(a1), ac2.val(a2));
         assert_eq!(ac1.val(b1), ac2.val(b2));
         assert_eq!(ac1.val(c1), ac2.val(c2));
+    }
+
+    #[test]
+    fn test_listener_notification() {
+        use std::sync::{Arc, Mutex};
+
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+        let b = ac.add_variable([2, 3, 4]);
+
+        // Track notifications
+        let notified_vars = Arc::new(Mutex::new(Vec::new()));
+        let notified_vars_clone = notified_vars.clone();
+
+        ac.set_listener(a, move |var_id| {
+            notified_vars_clone.lock().unwrap().push(var_id);
+        });
+
+        ac.set_listener(b, {
+            let notified_vars_clone = notified_vars.clone();
+            move |var_id| {
+                notified_vars_clone.lock().unwrap().push(var_id);
+            }
+        });
+
+        // Apply constraint that changes domains
+        ac.new_eq(a, b).expect("equality must succeed");
+
+        let notified = notified_vars.lock().unwrap();
+        // Both a and b should have been notified during propagation
+        assert!(notified.contains(&a), "Variable a should have been notified");
+        assert!(notified.contains(&b), "Variable b should have been notified");
     }
 }
