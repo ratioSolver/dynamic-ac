@@ -156,6 +156,42 @@ impl Engine {
         Ok(id)
     }
 
+    pub fn assert_batch(&mut self, constraint_ids: &[usize]) -> Result<(), PropagationError> {
+        let mut all_touched = HashSet::new();
+
+        for &id in constraint_ids {
+            let touched = self.constraint_vars(id)?;
+            if !self.constraints[id].active {
+                self.constraints[id].active = true;
+                all_touched.extend(touched);
+            }
+        }
+
+        self.propagate_from_vars(&all_touched.into_iter().collect::<Vec<_>>())
+    }
+
+    pub fn retract_batch(&mut self, constraint_ids: &[usize]) -> Result<(), PropagationError> {
+        let mut all_touched = HashSet::new();
+
+        for &id in constraint_ids {
+            let touched = self.constraint_vars(id)?;
+            if self.constraints[id].active {
+                self.constraints[id].active = false;
+
+                for &var in &touched {
+                    for state in &mut self.variables[var].domain {
+                        state.killers.remove(&id);
+                    }
+                }
+
+                all_touched.extend(touched);
+            }
+        }
+
+        self.residues.retain(|(cid, _, _, _), _| !constraint_ids.contains(cid));
+        self.propagate_from_vars(&all_touched.into_iter().collect::<Vec<_>>())
+    }
+
     fn constraint_vars(&self, constraint_id: usize) -> Result<Vec<usize>, PropagationError> {
         let Some(entry) = self.constraints.get(constraint_id) else {
             return Err(PropagationError::InvalidConstraintId(constraint_id));
@@ -573,5 +609,74 @@ mod tests {
         ac.retract(eq_id).expect("retract eq must succeed");
         assert_eq!(ac.val(a), vec![1, 2, 3]);
         assert_eq!(ac.val(b), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_assert_batch_equivalence() {
+        // assert_batch should produce same results as sequential assert calls
+        let mut ac1 = Engine::new();
+        let a1 = ac1.add_variable([1, 2, 3]);
+        let b1 = ac1.add_variable([2, 3, 4]);
+        let c1 = ac1.add_variable([3, 4, 5]);
+
+        let id0 = ac1.add_constraint(Constraint::Equality(a1, b1));
+        let id1 = ac1.add_constraint(Constraint::Equality(b1, c1));
+        let id2 = ac1.add_constraint(Constraint::Set(a1, 3));
+
+        ac1.assert_batch(&[id0, id1, id2]).expect("batch assert must succeed");
+
+        // Separate sequential calls
+        let mut ac2 = Engine::new();
+        let a2 = ac2.add_variable([1, 2, 3]);
+        let b2 = ac2.add_variable([2, 3, 4]);
+        let c2 = ac2.add_variable([3, 4, 5]);
+
+        let id0 = ac2.add_constraint(Constraint::Equality(a2, b2));
+        let id1 = ac2.add_constraint(Constraint::Equality(b2, c2));
+        let id2 = ac2.add_constraint(Constraint::Set(a2, 3));
+
+        ac2.assert(id0).expect("assert 0");
+        ac2.assert(id1).expect("assert 1");
+        ac2.assert(id2).expect("assert 2");
+
+        // Results must match
+        assert_eq!(ac1.val(a1), ac2.val(a2));
+        assert_eq!(ac1.val(b1), ac2.val(b2));
+        assert_eq!(ac1.val(c1), ac2.val(c2));
+    }
+
+    #[test]
+    fn test_retract_batch_equivalence() {
+        // Create two identical engines with constraints
+        let mut ac1 = Engine::new();
+        let a1 = ac1.add_variable([1, 2, 3]);
+        let b1 = ac1.add_variable([1, 2, 3]);
+        let c1 = ac1.add_variable([1, 2, 3]);
+
+        let id0 = ac1.new_eq(a1, b1).expect("eq 0");
+        let id1 = ac1.new_neq(b1, c1).expect("neq 1");
+        let id2 = ac1.set(a1, 2).expect("set 2");
+
+        let mut ac2 = Engine::new();
+        let a2 = ac2.add_variable([1, 2, 3]);
+        let b2 = ac2.add_variable([1, 2, 3]);
+        let c2 = ac2.add_variable([1, 2, 3]);
+
+        let id0_2 = ac2.new_eq(a2, b2).expect("eq 0");
+        let id1_2 = ac2.new_neq(b2, c2).expect("neq 1");
+        let id2_2 = ac2.set(a2, 2).expect("set 2");
+
+        // Batch retract
+        ac1.retract_batch(&[id0, id1, id2]).expect("batch retract");
+
+        // Sequential retract
+        ac2.retract(id0_2).expect("retract 0");
+        ac2.retract(id1_2).expect("retract 1");
+        ac2.retract(id2_2).expect("retract 2");
+
+        // Results must match
+        assert_eq!(ac1.val(a1), ac2.val(a2));
+        assert_eq!(ac1.val(b1), ac2.val(b2));
+        assert_eq!(ac1.val(c1), ac2.val(c2));
     }
 }
