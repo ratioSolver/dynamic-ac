@@ -3,7 +3,7 @@ use std::{
     fmt,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Constraint {
     Equality(usize, usize),   // Represents an equality constraint between two variables (e.g., x_i == x_j).
     Inequality(usize, usize), // Represents an inequality constraint between two variables (e.g., x_i != x_j).
@@ -176,8 +176,7 @@ impl Engine {
     }
 
     fn arcs_of(&self, constraint_id: usize) -> Vec<Arc> {
-        let kind = self.constraints[constraint_id].kind;
-        match kind {
+        match self.constraints[constraint_id].kind {
             Constraint::Equality(a, b) | Constraint::Inequality(a, b) => {
                 if a == b {
                     vec![Arc { constraint_id, from: a, to: b }]
@@ -233,14 +232,13 @@ impl Engine {
 
             let changed = self.revise(arc)?;
             if changed {
+                // Re-queue only incoming arcs: Y_i -> X_j where X_j = arc.from
                 for cid in self.touching_constraints(arc.from) {
                     for next_arc in self.arcs_of(cid) {
-                        if next_arc.constraint_id == arc.constraint_id && next_arc == arc {
-                            continue;
-                        }
-
-                        if in_queue.insert(next_arc) {
-                            queue.push_back(next_arc);
+                        if next_arc.to == arc.from && next_arc != arc {
+                            if in_queue.insert(next_arc) {
+                                queue.push_back(next_arc);
+                            }
                         }
                     }
                 }
@@ -369,6 +367,23 @@ impl Engine {
     }
 }
 
+impl fmt::Display for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Variables:")?;
+        for (i, var) in self.variables.iter().enumerate() {
+            let values: Vec<String> = var.domain.iter().map(|s| if s.killers.is_empty() { s.value.to_string() } else { format!("{} (killed by {:?})", s.value, s.killers) }).collect();
+            writeln!(f, "  e{}: {}", i, values.join(", "))?;
+        }
+
+        writeln!(f, "Constraints:")?;
+        for (i, entry) in self.constraints.iter().enumerate() {
+            writeln!(f, "  c{}: {} [{}]", i, entry.kind, if entry.active { "active" } else { "inactive" })?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +442,136 @@ mod tests {
         ac.retract(eq).expect("retract eq must succeed");
         assert_eq!(ac.val(a), vec![1, 2, 3]);
         assert_eq!(ac.val(b), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_basic_equality() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+        let b = ac.add_variable([2, 3, 4]);
+
+        ac.new_eq(a, b).expect("equality must succeed");
+
+        // Intersection should be {2, 3}
+        assert_eq!(ac.val(a), vec![2, 3]);
+        assert_eq!(ac.val(b), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_inequality_singleton_pruning() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1]);
+        let b = ac.add_variable([1, 2, 3]);
+
+        ac.new_neq(a, b).expect("inequality must succeed");
+
+        // Since a is {1}, b cannot be 1.
+        assert_eq!(ac.val(b), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_multiple_suppression_logic() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+        let b = ac.add_variable([1]);
+        let c = ac.add_variable([1]);
+
+        // Constraint 0: a != b  => a: {2, 3}
+        let id0 = ac.new_neq(a, b).expect("first neq must succeed");
+        // Constraint 1: a != c  => a: {2, 3}
+        let id1 = ac.new_neq(a, c).expect("second neq must succeed");
+
+        assert_eq!(ac.val(a), vec![2, 3]);
+
+        // Retract first inequality
+        ac.retract(id0).expect("retract must succeed");
+
+        // CRITICAL: Value '1' in 'a' was suppressed by id0.
+        // Even after retracting id0, '1' should stay suppressed because id1 (a != c) still forbids it.
+        assert_eq!(ac.val(a), vec![2, 3], "Value 1 should still be suppressed by the other inequality");
+
+        ac.retract(id1).expect("retract must succeed");
+        assert_eq!(ac.val(a), vec![1, 2, 3], "All values should be restored now");
+    }
+
+    #[test]
+    fn test_diamond_chain_propagation() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+        let b = ac.add_variable([2, 3, 4]);
+        let c = ac.add_variable([2, 3, 4]);
+        let d = ac.add_variable([3, 4, 5]);
+
+        // Setup chain: a == b, b == d, a == c, c == d
+        ac.new_eq(a, b).expect("a==b");
+        ac.new_eq(b, d).expect("b==d");
+        ac.new_eq(a, c).expect("a==c");
+        ac.new_eq(c, d).expect("c==d");
+
+        assert_eq!(ac.val(a), vec![3]);
+        assert_eq!(ac.val(d), vec![3]);
+    }
+
+    #[test]
+    fn test_inequality_chain_reaction() {
+        let mut ac = Engine::new();
+        // A chain where narrowing one forces another via inequalities
+        let a = ac.add_variable([1]);
+        let b = ac.add_variable([1, 2]);
+        let c = ac.add_variable([2, 3]);
+
+        ac.new_neq(a, b).expect("a!=b"); // forces b to {2}
+        ac.new_neq(b, c).expect("b!=c"); // forces c to {3}
+
+        assert_eq!(ac.val(b), vec![2]);
+        assert_eq!(ac.val(c), vec![3]);
+    }
+
+    #[test]
+    fn test_set_constraint_and_retraction() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+
+        let set_id = ac.set(a, 2).expect("set must succeed");
+        assert_eq!(ac.val(a), vec![2]);
+
+        ac.retract(set_id).expect("retract must succeed");
+        assert_eq!(ac.val(a), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_forbid_constraint_and_retraction() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+
+        let forbid_id = ac.forbid(a, 2).expect("forbid must succeed");
+        assert_eq!(ac.val(a), vec![1, 3]);
+
+        ac.retract(forbid_id).expect("retract must succeed");
+        assert_eq!(ac.val(a), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_set_with_binary_interaction_and_retraction() {
+        let mut ac = Engine::new();
+        let a = ac.add_variable([1, 2, 3]);
+        let b = ac.add_variable([2, 3]);
+
+        let eq_id = ac.new_eq(a, b).expect("equality must succeed");
+        let set_id = ac.set(a, 2).expect("set must succeed");
+
+        // set(a,2) should propagate through equality to b
+        assert_eq!(ac.val(a), vec![2]);
+        assert_eq!(ac.val(b), vec![2]);
+
+        // Retracting only set should keep binary propagation active.
+        // Since eq(a, b) is still active and b is {2}, a remains {2}.
+        ac.retract(set_id).expect("retract set must succeed");
+        assert_eq!(ac.val(a), vec![2]);
+        assert_eq!(ac.val(b), vec![2]);
+
+        ac.retract(eq_id).expect("retract eq must succeed");
+        assert_eq!(ac.val(a), vec![1, 2, 3]);
+        assert_eq!(ac.val(b), vec![2, 3]);
     }
 }
