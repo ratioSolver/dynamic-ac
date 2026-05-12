@@ -70,6 +70,7 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// Creates a new empty constraint engine with no variables or constraints.
     pub fn new() -> Self {
         Self {
             variables: Vec::new(),
@@ -79,6 +80,19 @@ impl Engine {
         }
     }
 
+    /// Adds a new variable with the specified domain.
+    ///
+    /// All values in the domain start as active (not suppressed by any constraint).
+    /// Duplicate values are automatically deduplicated.
+    ///
+    /// Returns the variable ID, which can be used with `new_eq`, `new_neq`, `set`, and `forbid`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut engine = Engine::new();
+    /// let x = engine.add_variable([1, 2, 3]);
+    /// assert_eq!(engine.val(x), vec![1, 2, 3]);
+    /// ```
     pub fn add_variable(&mut self, domain: impl IntoIterator<Item = i32>) -> usize {
         let mut unique = Vec::new();
         let mut seen = HashSet::new();
@@ -102,16 +116,31 @@ impl Engine {
         id
     }
 
+    /// Returns the currently active domain values of a variable.
+    ///
+    /// Values that are suppressed by active constraints are excluded from the result.
+    ///
+    /// # Panics
+    /// Panics if `var_id` is not a valid variable ID.
     pub fn val(&self, var_id: usize) -> Vec<i32> {
         self.variables[var_id].domain.iter().filter_map(|state| if state.killers.is_empty() { Some(state.value) } else { None }).collect()
     }
 
+    /// Adds a constraint to the engine without activating it.
+    ///
+    /// Returns the constraint ID. Use `assert` to activate it and trigger propagation.
     pub fn add_constraint(&mut self, constraint: Constraint) -> usize {
         let id = self.constraints.len();
         self.constraints.push(ConstraintEntry { active: false, kind: constraint });
         id
     }
 
+    /// Activates a constraint and propagates its effects.
+    ///
+    /// If the constraint is already active, this is a no-op.
+    ///
+    /// # Errors
+    /// Returns `PropagationError` if propagation causes a domain wipeout (no solution exists).
     pub fn assert(&mut self, constraint_id: usize) -> Result<(), PropagationError> {
         let touched = self.constraint_vars(constraint_id)?;
         if self.constraints[constraint_id].active {
@@ -122,6 +151,15 @@ impl Engine {
         self.propagate_from_vars(&touched)
     }
 
+    /// Deactivates a constraint and re-propagates the affected neighborhood.
+    ///
+    /// If the constraint is already inactive, this is a no-op.
+    /// Values that were suppressed only by this constraint are restored,
+    /// and the affected subgraph is re-propagated incrementally.
+    ///
+    /// # Errors
+    /// Returns `PropagationError` if re-propagation unexpectedly causes a domain wipeout.
+    /// This should not happen in normal operation.
     pub fn retract(&mut self, constraint_id: usize) -> Result<(), PropagationError> {
         let touched = self.constraint_vars(constraint_id)?;
         if !self.constraints[constraint_id].active {
@@ -140,30 +178,74 @@ impl Engine {
         self.propagate_from_vars(&touched)
     }
 
+    /// Creates an equality constraint between two variables and asserts it.
+    ///
+    /// The two variables must have at least one common value, or propagation will fail.
+    ///
+    /// # Errors
+    /// Returns `PropagationError::DomainWipeout` if no common value exists.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut engine = Engine::new();
+    /// let a = engine.add_variable([1, 2, 3]);
+    /// let b = engine.add_variable([2, 3, 4]);
+    /// engine.new_eq(a, b)?;  // Both now have domain {2, 3}
+    /// ```
     pub fn new_eq(&mut self, a: usize, b: usize) -> Result<usize, PropagationError> {
         let id = self.add_constraint(Constraint::Equality(a, b));
         self.assert(id)?;
         Ok(id)
     }
 
+    /// Creates an inequality constraint between two variables and asserts it.
+    ///
+    /// # Errors
+    /// Returns `PropagationError::DomainWipeout` if a domain becomes empty.
     pub fn new_neq(&mut self, a: usize, b: usize) -> Result<usize, PropagationError> {
         let id = self.add_constraint(Constraint::Inequality(a, b));
         self.assert(id)?;
         Ok(id)
     }
 
+    /// Creates a unary set constraint (variable must equal value) and asserts it.
+    ///
+    /// # Errors
+    /// Returns `PropagationError::DomainWipeout` if the value is not in the variable's domain.
     pub fn set(&mut self, var: usize, value: i32) -> Result<usize, PropagationError> {
         let id = self.add_constraint(Constraint::Set(var, value));
         self.assert(id)?;
         Ok(id)
     }
 
+    /// Creates a unary forbid constraint (variable cannot equal value) and asserts it.
+    ///
+    /// # Errors
+    /// Returns `PropagationError::DomainWipeout` if the value is the only value in the domain.
     pub fn forbid(&mut self, var: usize, value: i32) -> Result<usize, PropagationError> {
         let id = self.add_constraint(Constraint::Forbid(var, value));
         self.assert(id)?;
         Ok(id)
     }
 
+    /// Asserts multiple constraints at once and propagates them together.
+    ///
+    /// More efficient than calling `assert` multiple times, as it accumulates
+    /// all affected variables and performs a single propagation pass.
+    /// Automatically deduplicates variables using a `HashSet`.
+    ///
+    /// # Errors
+    /// Returns `PropagationError` if any assertion fails or propagation causes a domain wipeout.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut engine = Engine::new();
+    /// let x = engine.add_variable([1, 2, 3]);
+    /// let y = engine.add_variable([2, 3, 4]);
+    /// let id1 = engine.add_constraint(Constraint::Equality(x, y));
+    /// let id2 = engine.add_constraint(Constraint::Set(x, 2));
+    /// engine.assert_batch(&[id1, id2])?;  // Single propagation pass
+    /// ```
     pub fn assert_batch(&mut self, constraint_ids: &[usize]) -> Result<(), PropagationError> {
         let mut all_touched = HashSet::new();
 
@@ -178,6 +260,13 @@ impl Engine {
         self.propagate_from_vars(&all_touched.into_iter().collect::<Vec<_>>())
     }
 
+    /// Retracts multiple constraints at once and re-propagates incrementally.
+    ///
+    /// More efficient than calling `retract` multiple times, as it accumulates
+    /// all affected variables and performs a single re-propagation pass.
+    ///
+    /// # Errors
+    /// Returns `PropagationError` if re-propagation causes an unexpected domain wipeout.
     pub fn retract_batch(&mut self, constraint_ids: &[usize]) -> Result<(), PropagationError> {
         let mut all_touched = HashSet::new();
 
@@ -200,8 +289,21 @@ impl Engine {
         self.propagate_from_vars(&all_touched.into_iter().collect::<Vec<_>>())
     }
 
-    /// Register a callback to be notified when a variable's domain changes.
-    /// The callback receives the variable ID.
+    /// Registers a callback to be notified when a variable's domain changes.
+    ///
+    /// The callback receives the variable ID and is invoked whenever the domain
+    /// is modified (values suppressed or restored) during constraint propagation.
+    ///
+    /// Multiple callbacks can be registered for the same variable.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut engine = Engine::new();
+    /// let x = engine.add_variable([1, 2, 3]);
+    /// engine.set_listener(x, |var_id| {
+    ///     println!("Variable {} domain changed", var_id);
+    /// });
+    /// ```
     pub fn set_listener<F>(&mut self, var: usize, callback: F)
     where
         F: Fn(usize) + 'static,
