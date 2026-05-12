@@ -1,8 +1,8 @@
-# dynamic-ac
+# ac3rm
 
 A highly efficient incremental Arc Consistency (AC-3rm) propagator written in Rust.
 
-**dynamic-ac** maintains constraint consistency dynamically, supporting:
+**ac3rm** maintains constraint consistency dynamically, supporting:
 - **Dynamic constraint insertion** with incremental propagation
 - **Dynamic constraint retraction** with neighborhood re-propagation
 - **AC-3rm algorithm** with residual supports for optimal constraint checking
@@ -48,7 +48,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-dynamic-ac = "0.1"
+ac3rm = "0.1"
 ```
 
 ## Usage
@@ -56,7 +56,7 @@ dynamic-ac = "0.1"
 ### Basic Constraint Propagation
 
 ```rust
-use dynamic_ac::Engine;
+use ac3rm::Engine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = Engine::new();
@@ -79,6 +79,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Dynamic Constraint Retraction
 
 ```rust
+use ac3rm::Engine;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut engine = Engine::new();
+let a = engine.add_variable([1, 2, 3]);
+let b = engine.add_variable([2, 3, 4]);
+
 let eq_id = engine.new_eq(a, b)?;
 assert_eq!(engine.val(a), vec![2, 3]);
 
@@ -88,23 +95,42 @@ engine.retract(eq_id)?;
 // Domains return to original state
 assert_eq!(engine.val(a), vec![1, 2, 3]);
 assert_eq!(engine.val(b), vec![2, 3, 4]);
+
+Ok(())
+}
 ```
 
 ### Batch Operations
 
 ```rust
+use ac3rm::{Constraint, Engine};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut engine = Engine::new();
+let x = engine.add_variable([1, 2, 3]);
+let y = engine.add_variable([1, 2, 3]);
+
 let c1 = engine.add_constraint(Constraint::Equality(x, y));
 let c2 = engine.add_constraint(Constraint::Set(x, 2));
 let c3 = engine.add_constraint(Constraint::Forbid(y, 1));
 
 // Apply all three constraints with a single propagation pass
 engine.assert_batch(&[c1, c2, c3])?;
+
+Ok(())
+}
 ```
 
 ### Listener Callbacks
 
 ```rust
+use ac3rm::Engine;
 use std::sync::{Arc, Mutex};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut engine = Engine::new();
+let x = engine.add_variable([1, 2, 3]);
+let y = engine.add_variable([2, 3, 4]);
 
 let changes = Arc::new(Mutex::new(Vec::new()));
 let changes_clone = changes.clone();
@@ -114,12 +140,15 @@ engine.set_listener(x, move |var_id| {
 });
 
 engine.new_eq(x, y)?;  // Triggers listener callback
+
+Ok(())
+}
 ```
 
 ### Error Handling
 
 ```rust
-use dynamic_ac::PropagationError;
+use ac3rm::PropagationError;
 
 match engine.new_eq(a, b) {
     Ok(id) => println!("Constraint {} asserted", id),

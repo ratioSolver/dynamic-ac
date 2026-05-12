@@ -1,11 +1,13 @@
 [package]
-name = "dynamic-ac"
+name = "ac3rm"
 version = "0.1.0"
 authors = ["Riccardo De Benedictis"]
 edition = "2024"
-description = "An incremental Arc Consistency propagator in Rust that supports dynamic addition and retraction of binary constraints"
+description = "An incremental AC-3rm propagator in Rust with dynamic assertion and retraction of constraints"
 readme = "README.md"
 repository = "https://github.com/ratioSolver/dynamic-ac"
-license-file = "LICENSE.txt"
+license-file = "LICENSE"
+keywords = ["constraints", "arc-consistency", "ac3", "ac3rm", "csp"]
+categories = ["algorithms", "data-structures"]
 
 [dependencies]

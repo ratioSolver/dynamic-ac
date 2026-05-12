@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "dynamic-ac"
+name = "ac3rm"
 version = "0.1.0"
